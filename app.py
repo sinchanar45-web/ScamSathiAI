@@ -1,4 +1,3 @@
-
 import streamlit as st
 import requests
 import os
@@ -14,14 +13,11 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
-    SimpleDocTemplate,
-    Paragraph,
-    Spacer,
-    Table,
-    TableStyle,
-    HRFlowable,
-    KeepTogether
+    SimpleDocTemplate, Paragraph, Spacer,
+    Table, TableStyle, HRFlowable
 )
 
 # --------------------------------
@@ -33,762 +29,866 @@ load_dotenv(BASE_DIR / ".env")
 
 API_KEY = os.getenv("GNANI_API_KEY")
 
-# Streamlit Community Cloud secrets fallback
 if not API_KEY:
     try:
-        API_KEY = st.secrets["GNANI_API_KEY"]
+        API_KEY = st.secrets.get("GNANI_API_KEY")
     except Exception:
         API_KEY = None
+
+API_URL = "https://api.vachana.ai/stt/v3"
+MODEL = "prisma-v3.0"
 
 st.set_page_config(
     page_title="ScamSathi AI",
     page_icon="🛡️",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
 # --------------------------------
-# CUSTOM DESIGN
-# --------------------------------
-
-st.markdown("""
-<style>
-.stApp {
-    background-color: #0b1220;
-    color: #f1f5f9;
-}
-
-.block-container {
-    padding-top: 2rem;
-    max-width: 1200px;
-}
-
-.hero {
-    background: linear-gradient(120deg, #14233d, #183c59);
-    padding: 28px;
-    border-radius: 16px;
-    border: 1px solid #294765;
-    margin-bottom: 22px;
-}
-
-.hero h1 {
-    color: #ffffff;
-    margin-bottom: 5px;
-}
-
-.hero p {
-    color: #cbd5e1;
-    margin-bottom: 0;
-}
-
-.section-card {
-    background: #131f32;
-    padding: 18px;
-    border-radius: 12px;
-    border: 1px solid #263a54;
-    margin-bottom: 14px;
-}
-
-.small-muted {
-    color: #a9b8ca;
-    font-size: 13px;
-}
-
-div[data-testid="stMetric"] {
-    background: #131f32;
-    padding: 15px;
-    border-radius: 12px;
-    border: 1px solid #263a54;
-}
-
-.stButton button {
-    border-radius: 9px;
-    font-weight: 600;
-}
-
-.stDownloadButton button {
-    border-radius: 9px;
-    font-weight: 600;
-}
-</style>
-""", unsafe_allow_html=True)
-
-
-# --------------------------------
-# RISK ANALYSIS ENGINE
-# ENGLISH + KANNADA DETECTION
-# --------------------------------
-
-def analyze_scam(transcript):
-
-    text = transcript.lower()
-
-    patterns = {
-
-        "Sensitive information requests": {
-            "keywords": [
-                "otp",
-                "one time password",
-                "one-time password",
-                "password",
-                "cvv",
-                "pin",
-                "bank details",
-                "account number",
-
-                "ಒಟಿಪಿ",
-                "ಒಟಿಪಿಯನ್ನು",
-                "ಒನ್ ಟೈಮ್ ಪಾಸ್ವರ್ಡ್",
-                "ಪಾಸ್ವರ್ಡ್",
-                "ಸಿವಿವಿ",
-                "ಪಿನ್",
-                "ಬ್ಯಾಂಕ್ ವಿವರಗಳು",
-                "ಖಾತೆ ಸಂಖ್ಯೆ"
-            ],
-            "points": 85
-        },
-
-        "Urgent payment requests": {
-            "keywords": [
-                "transfer money",
-                "send money",
-                "upi payment",
-                "pay immediately",
-                "urgent payment",
-                "make a payment",
-
-                "ಹಣ ವರ್ಗಾಯಿಸಿ",
-                "ಹಣ ಕಳುಹಿಸಿ",
-                "ತಕ್ಷಣ ಪಾವತಿಸಿ",
-                "ಕೂಡಲೇ ಪಾವತಿಸಿ",
-                "ಹಣ ಪಾವತಿಸಿ"
-            ],
-            "points": 35
-        },
-
-        "Threatening or pressuring language": {
-            "keywords": [
-                "account blocked",
-                "account will be blocked",
-                "account may be blocked",
-                "blocked today",
-                "police case",
-                "arrest",
-                "legal action",
-                "immediately",
-                "right now",
-                "within one hour",
-
-                "ಬ್ಲಾಕ್ ಆಗುತ್ತದೆ",
-                "ಬ್ಲಾಕ್ ಆಗಲಿದೆ",
-                "ಖಾತೆ ಬ್ಲಾಕ್",
-                "ಖಾತೆಯನ್ನು ನಿರ್ಬಂಧಿಸಲಾಗುತ್ತದೆ",
-                "ಖಾತೆ ಸ್ಥಗಿತ",
-                "ತಕ್ಷಣ",
-                "ಕೂಡಲೇ",
-                "ಪೊಲೀಸ್ ಪ್ರಕರಣ",
-                "ಬಂಧಿಸಲಾಗುತ್ತದೆ",
-                "ಕಾನೂನು ಕ್ರಮ"
-            ],
-            "points": 25
-        },
-
-        "Suspicious links or access requests": {
-            "keywords": [
-                "click this link",
-                "download this app",
-                "remote access",
-                "screen sharing",
-                "share your screen",
-                "install this application",
-
-                "ಈ ಲಿಂಕ್ ಕ್ಲಿಕ್ ಮಾಡಿ",
-                "ಈ ಆಪ್ ಡೌನ್‌ಲೋಡ್ ಮಾಡಿ",
-                "ಸ್ಕ್ರೀನ್ ಹಂಚಿಕೊಳ್ಳಿ",
-                "ರಿಮೋಟ್ ಆಕ್ಸೆಸ್"
-            ],
-            "points": 35
-        },
-
-        "Suspicious identity or KYC claims": {
-            "keywords": [
-                "bank officer",
-                "calling from your bank",
-                "customer care",
-                "government officer",
-                "kyc update",
-                "kyc verification",
-                "verify your account",
-                "lottery winner",
-                "prize money",
-
-                "ನಿಮ್ಮ ಬ್ಯಾಂಕಿನಿಂದ ಕರೆ",
-                "ಬ್ಯಾಂಕಿನಿಂದ ಕರೆ ಮಾಡುತ್ತಿದ್ದೇನೆ",
-                "ಕೆವೈಸಿ ಪರಿಶೀಲನೆ",
-                "ಕೆವೈಸಿ ಪರೀಕ್ಷೆ",
-                "ಖಾತೆಯನ್ನು ಪರಿಶೀಲಿಸಿ"
-            ],
-            "points": 15
-        }
-    }
-
-    detected = []
-    score = 0
-
-    for category, details in patterns.items():
-
-        matched = [
-            word for word in details["keywords"]
-            if word in text
-        ]
-
-        if matched:
-
-            score += details["points"]
-
-            detected.append({
-                "category": category,
-                "keywords": matched,
-                "points": details["points"]
-            })
-
-    score = min(score, 100)
-
-    if score >= 70:
-
-        risk = "HIGH"
-
-        recommendation = (
-            "Strong warning signs were detected. Do not share OTPs, "
-            "passwords, PINs or banking information. Do not transfer "
-            "money based on this call. Contact the organisation using "
-            "its official contact details."
-        )
-
-    elif score >= 35:
-
-        risk = "MEDIUM"
-
-        recommendation = (
-            "Suspicious signals were detected. Do not rush into "
-            "payments or sharing personal information. Verify the "
-            "caller's identity through an official channel."
-        )
-
-    else:
-
-        risk = "LOW"
-
-        recommendation = (
-            "Few or no matching warning patterns were detected. "
-            "This does not guarantee that the call is safe. Never "
-            "share OTPs, passwords or banking credentials."
-        )
-
-    return score, risk, detected, recommendation
-
-
-# --------------------------------
-# PROFESSIONAL PDF REPORT GENERATOR
-# --------------------------------
-
-def create_report(item):
-
-    buffer = io.BytesIO()
-
-    report_id = item.get("report_id")
-
-    if not report_id:
-        report_id = "SSA-" + uuid.uuid4().hex[:10].upper()
-        item["report_id"] = report_id
-
-    navy = colors.HexColor("#14233D")
-    blue = colors.HexColor("#1D4E89")
-    light_blue = colors.HexColor("#EAF2FA")
-    grey = colors.HexColor("#64748B")
-    dark = colors.HexColor("#1E293B")
-    border = colors.HexColor("#D9E2EC")
-
-    if item["risk"] == "HIGH":
-        risk_color = colors.HexColor("#DC2626")
-        risk_bg = colors.HexColor("#FEE2E2")
-    elif item["risk"] == "MEDIUM":
-        risk_color = colors.HexColor("#D97706")
-        risk_bg = colors.HexColor("#FEF3C7")
-    else:
-        risk_color = colors.HexColor("#15803D")
-        risk_bg = colors.HexColor("#DCFCE7")
-
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        rightMargin=18 * mm,
-        leftMargin=18 * mm,
-        topMargin=17 * mm,
-        bottomMargin=18 * mm,
-        title="ScamSathi AI Analysis Report",
-        author="ScamSathi AI",
-        subject="Preliminary call safety screening"
-    )
-
-    styles = getSampleStyleSheet()
-
-    styles.add(ParagraphStyle(
-        name="ReportTitle",
-        parent=styles["Title"],
-        fontName="Helvetica-Bold",
-        fontSize=23,
-        leading=28,
-        textColor=colors.white,
-        alignment=TA_LEFT,
-        spaceAfter=5
-    ))
-
-    styles.add(ParagraphStyle(
-        name="ReportSubtitle",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=10,
-        leading=15,
-        textColor=colors.HexColor("#DCE8F5")
-    ))
-
-    styles.add(ParagraphStyle(
-        name="SectionHeading",
-        parent=styles["Heading2"],
-        fontName="Helvetica-Bold",
-        fontSize=12,
-        leading=16,
-        textColor=navy,
-        spaceBefore=12,
-        spaceAfter=7
-    ))
-
-    styles.add(ParagraphStyle(
-        name="BodyCustom",
-        parent=styles["BodyText"],
-        fontName="Helvetica",
-        fontSize=9,
-        leading=14,
-        textColor=dark,
-        spaceAfter=4
-    ))
-
-    styles.add(ParagraphStyle(
-        name="SmallCustom",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=8,
-        leading=11,
-        textColor=grey
-    ))
-
-    styles.add(ParagraphStyle(
-        name="RiskValue",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=22,
-        leading=27,
-        textColor=risk_color,
-        alignment=TA_CENTER
-    ))
-
-    styles.add(ParagraphStyle(
-        name="RiskLabel",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=10,
-        leading=14,
-        textColor=risk_color,
-        alignment=TA_CENTER
-    ))
-
-    styles.add(ParagraphStyle(
-        name="TableHeaderCustom",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=8,
-        leading=11,
-        textColor=colors.white
-    ))
-
-    styles.add(ParagraphStyle(
-        name="TableBodyCustom",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=8,
-        leading=12,
-        textColor=dark
-    ))
-
-    story = []
-
-    # HEADER
-
-    header_content = [
-        Paragraph(
-            "SCAMSATHI AI",
-            styles["ReportTitle"]
-        ),
-        Paragraph(
-            "MULTILINGUAL CALL SAFETY ANALYSIS",
-            styles["ReportSubtitle"]
-        ),
-        Spacer(1, 5)
-    ]
-
-    header_table = Table(
-        [[header_content]],
-        colWidths=[174 * mm]
-    )
-
-    header_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), navy),
-        ("BOX", (0, 0), (-1, -1), 0.8, blue),
-        ("LEFTPADDING", (0, 0), (-1, -1), 14),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 14),
-        ("TOPPADDING", (0, 0), (-1, -1), 14),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE")
-    ]))
-
-    story.append(header_table)
-    story.append(Spacer(1, 12))
-
-    # REPORT INFORMATION
-
-    info_data = [
-        [
-            Paragraph("<b>REPORT ID</b>", styles["SmallCustom"]),
-            Paragraph("<b>ANALYSIS DATE</b>", styles["SmallCustom"]),
-            Paragraph("<b>AUDIO FILE</b>", styles["SmallCustom"])
-        ],
-        [
-            Paragraph(escape(report_id), styles["BodyCustom"]),
-            Paragraph(escape(item["date"]), styles["BodyCustom"]),
-            Paragraph(escape(item.get("filename", "Audio recording")), styles["BodyCustom"])
-        ]
-    ]
-
-    info_table = Table(
-        info_data,
-        colWidths=[48 * mm, 54 * mm, 72 * mm]
-    )
-
-    info_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), light_blue),
-        ("BOX", (0, 0), (-1, -1), 0.6, border),
-        ("INNERGRID", (0, 0), (-1, -1), 0.4, border),
-        ("LEFTPADDING", (0, 0), (-1, -1), 8),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-        ("TOPPADDING", (0, 0), (-1, -1), 8),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
-        ("VALIGN", (0, 0), (-1, -1), "TOP")
-    ]))
-
-    story.append(info_table)
-
-    # RISK SUMMARY
-
-    story.append(Paragraph(
-        "01  |  RISK ASSESSMENT",
-        styles["SectionHeading"]
-    ))
-
-    risk_table = Table(
-        [[
-            Paragraph(
-                f"{item['score']} / 100",
-                styles["RiskValue"]
-            ),
-            Paragraph(
-                item["risk"] + " RISK",
-                styles["RiskLabel"]
-            ),
-            Paragraph(
-                f"{len(item['detected'])} warning categories",
-                styles["BodyCustom"]
-            )
-        ]],
-        colWidths=[58 * mm, 58 * mm, 58 * mm]
-    )
-
-    risk_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (0, 0), light_blue),
-        ("BACKGROUND", (1, 0), (1, 0), risk_bg),
-        ("BACKGROUND", (2, 0), (2, 0), colors.HexColor("#F1F5F9")),
-        ("BOX", (0, 0), (-1, -1), 0.6, border),
-        ("INNERGRID", (0, 0), (-1, -1), 0.5, border),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("TOPPADDING", (0, 0), (-1, -1), 14),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 14)
-    ]))
-
-    story.append(risk_table)
-
-    # WARNING SIGNALS
-
-    story.append(Paragraph(
-        "02  |  DETECTED WARNING SIGNALS",
-        styles["SectionHeading"]
-    ))
-
-    if item["detected"]:
-
-        signal_data = [[
-            Paragraph("CATEGORY", styles["TableHeaderCustom"]),
-            Paragraph("MATCHED TERMS", styles["TableHeaderCustom"]),
-            Paragraph("POINTS", styles["TableHeaderCustom"])
-        ]]
-
-        for signal in item["detected"]:
-
-            signal_data.append([
-                Paragraph(
-                    escape(signal["category"]),
-                    styles["TableBodyCustom"]
-                ),
-                Paragraph(
-                    escape(", ".join(signal["keywords"])),
-                    styles["TableBodyCustom"]
-                ),
-                Paragraph(
-                    f"+{signal['points']}",
-                    styles["TableBodyCustom"]
-                )
-            ])
-
-        signal_table = Table(
-            signal_data,
-            colWidths=[58 * mm, 96 * mm, 20 * mm],
-            repeatRows=1
-        )
-
-        signal_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), navy),
-            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [
-                colors.white,
-                colors.HexColor("#F4F7FB")
-            ]),
-            ("BOX", (0, 0), (-1, -1), 0.6, border),
-            ("INNERGRID", (0, 0), (-1, -1), 0.4, border),
-            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 7),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-            ("TOPPADDING", (0, 0), (-1, -1), 8),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 8)
-        ]))
-
-        story.append(signal_table)
-
-    else:
-
-        story.append(Paragraph(
-            "No matching warning patterns were detected.",
-            styles["BodyCustom"]
-        ))
-
-    # TRANSCRIPT
-
-    story.append(Paragraph(
-        "03  |  CALL TRANSCRIPT",
-        styles["SectionHeading"]
-    ))
-
-    transcript = escape(item["transcript"]).replace("\n", "<br/>")
-
-    transcript_box = Table(
-        [[Paragraph(transcript, styles["BodyCustom"])]],
-        colWidths=[174 * mm]
-    )
-
-    transcript_box.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F4F7FB")),
-        ("BOX", (0, 0), (-1, -1), 0.6, border),
-        ("LEFTPADDING", (0, 0), (-1, -1), 10),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-        ("TOPPADDING", (0, 0), (-1, -1), 10),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 10)
-    ]))
-
-    story.append(transcript_box)
-
-    story.append(Paragraph(
-        "Speech recognition: Gnani AI Prisma v3.0",
-        styles["SmallCustom"]
-    ))
-
-    # SAFETY RECOMMENDATION
-
-    story.append(Paragraph(
-        "04  |  SAFETY RECOMMENDATION",
-        styles["SectionHeading"]
-    ))
-
-    recommendation_box = Table(
-        [[Paragraph(
-            escape(item["recommendation"]),
-            styles["BodyCustom"]
-        )]],
-        colWidths=[174 * mm]
-    )
-
-    recommendation_box.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), light_blue),
-        ("BOX", (0, 0), (-1, -1), 0.8, blue),
-        ("LEFTPADDING", (0, 0), (-1, -1), 10),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
-        ("TOPPADDING", (0, 0), (-1, -1), 10),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 10)
-    ]))
-
-    story.append(recommendation_box)
-
-    # DISCLAIMER
-
-    story.append(Paragraph(
-        "IMPORTANT DISCLAIMER",
-        styles["SectionHeading"]
-    ))
-
-    disclaimer = (
-        "ScamSathi AI provides preliminary rule-based screening and "
-        "does not confirm whether a call is genuine or fraudulent. "
-        "Results depend on speech recognition quality and keyword "
-        "matching. Context, negation and transcription errors may "
-        "affect the result. A low-risk score does not guarantee that "
-        "a call is safe. Always verify important requests independently."
-    )
-
-    story.append(Paragraph(
-        disclaimer,
-        styles["SmallCustom"]
-    ))
-
-    story.append(Spacer(1, 15))
-
-    story.append(HRFlowable(
-        width="100%",
-        thickness=0.8,
-        color=border
-    ))
-
-    story.append(Spacer(1, 7))
-
-    story.append(Paragraph(
-        "SCAMSATHI AI  |  POWERED BY GNANI AI PRISMA V3.0",
-        ParagraphStyle(
-            "FooterCustom",
-            parent=styles["SmallCustom"],
-            alignment=TA_CENTER,
-            textColor=blue,
-            fontName="Helvetica-Bold"
-        )
-    ))
-
-    story.append(Paragraph(
-        "Call safety awareness • Preliminary screening report",
-        ParagraphStyle(
-            "FooterSub",
-            parent=styles["SmallCustom"],
-            alignment=TA_CENTER
-        )
-    ))
-
-    # PAGE FOOTER
-
-    def add_page_number(canvas, doc):
-
-        canvas.saveState()
-
-        canvas.setStrokeColor(border)
-        canvas.line(
-            18 * mm,
-            13 * mm,
-            A4[0] - 18 * mm,
-            13 * mm
-        )
-
-        canvas.setFont("Helvetica", 8)
-        canvas.setFillColor(grey)
-
-        canvas.drawRightString(
-            A4[0] - 18 * mm,
-            8 * mm,
-            f"Page {doc.page}"
-        )
-
-        canvas.restoreState()
-
-    doc.build(
-        story,
-        onFirstPage=add_page_number,
-        onLaterPages=add_page_number
-    )
-
-    buffer.seek(0)
-
-    return buffer.getvalue()
-
-
-# --------------------------------
-# SESSION HISTORY
+# SESSION STATE
 # --------------------------------
 
 if "history" not in st.session_state:
     st.session_state.history = []
 
-if "latest_result" not in st.session_state:
-    st.session_state.latest_result = None
-
-
-# --------------------------------
-# SIDEBAR
-# --------------------------------
-
-with st.sidebar:
-
-    st.title("🛡️ ScamSathi AI")
-
-    st.caption("Your call safety companion")
-
-    st.divider()
-
-    st.markdown("### How it works")
-
-    st.write("1. Upload a call recording")
-    st.write("2. Prisma converts speech into text")
-    st.write("3. English and Kannada warning patterns are checked")
-    st.write("4. Risk score and safety advice appear")
-
-    st.divider()
-
-    st.markdown("### Technology")
-
-    st.write("🎙️ Gnani AI Prisma v3.0")
-    st.write("🐍 Python")
-    st.write("⚡ Streamlit")
-
-    st.divider()
-
-    st.caption("Project prototype | 2026")
-
+if "analysis_result" not in st.session_state:
+    st.session_state.analysis_result = None
 
 # --------------------------------
-# MAIN HEADER
+# THEME AND CUSTOM CSS
+# --------------------------------
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Outfit:wght@400;500;600;700;800&display=swap');
+
+html, body, [class*="css"] {
+    font-family: 'DM Sans', sans-serif;
+}
+
+.stApp {
+    background:
+        radial-gradient(circle at 10% 0%, rgba(185,164,245,0.10), transparent 28%),
+        radial-gradient(circle at 90% 10%, rgba(36,198,181,0.08), transparent 25%),
+        #171329;
+    color: #F4F0FA;
+}
+
+header[data-testid="stHeader"] {
+    background: transparent;
+}
+
+.block-container {
+    padding-top: 2rem;
+    padding-bottom: 3rem;
+    max-width: 1200px;
+}
+
+h1, h2, h3 {
+    font-family: 'Outfit', sans-serif;
+    color: #F4F0FA;
+}
+
+p, label, span {
+    color: #D8D1E8;
+}
+
+.hero {
+    background: linear-gradient(120deg, #292342, #176B68);
+    padding: 36px;
+    border-radius: 24px;
+    border: 1px solid rgba(255,255,255,0.12);
+    margin-bottom: 25px;
+}
+
+.hero h1 {
+    font-size: 42px;
+    font-weight: 800;
+    margin-bottom: 8px;
+    color: #FFFFFF;
+}
+
+.hero p {
+    color: #E5FFF9;
+    font-size: 16px;
+}
+
+.section-card {
+    background: #211B38;
+    border: 1px solid rgba(185,164,245,0.18);
+    border-radius: 18px;
+    padding: 22px;
+    margin-bottom: 18px;
+}
+
+.metric-card {
+    background: #292342;
+    border: 1px solid rgba(185,164,245,0.22);
+    padding: 20px;
+    border-radius: 16px;
+    text-align: center;
+}
+
+.metric-number {
+    font-size: 32px;
+    font-weight: 800;
+    color: #65E0D1;
+}
+
+.metric-label {
+    color: #C9C0DC;
+    font-size: 13px;
+}
+
+.stButton > button {
+    background: linear-gradient(90deg, #24C6B5, #65E0D1);
+    color: #171329;
+    border: none;
+    border-radius: 12px;
+    font-weight: 800;
+    padding: 0.65rem 1.4rem;
+    min-height: 45px;
+}
+
+.stButton > button:hover {
+    background: #65E0D1;
+    color: #171329;
+    border: none;
+}
+
+.stTabs [data-baseweb="tab-list"] {
+    gap: 12px;
+    background: #211B38;
+    padding: 9px;
+    border-radius: 14px;
+}
+
+.stTabs [data-baseweb="tab"] {
+    background: transparent;
+    color: #D8D1E8;
+    border-radius: 10px;
+    padding: 10px 18px;
+}
+
+.stTabs [aria-selected="true"] {
+    background: #176B68 !important;
+    color: #FFFFFF !important;
+}
+
+[data-testid="stFileUploader"] {
+    background: #211B38;
+    border: 1px dashed #65E0D1;
+    border-radius: 16px;
+    padding: 15px;
+}
+
+[data-testid="stAudio"] {
+    width: 100%;
+}
+
+div[data-testid="stAlert"] {
+    border-radius: 12px;
+}
+
+.footer {
+    text-align: center;
+    color: #9B91B5;
+    font-size: 12px;
+    padding: 25px 0 5px 0;
+}
+
+.small-note {
+    color: #AFA5C7;
+    font-size: 12px;
+}
+
+.about-feature {
+    background: #292342;
+    border: 1px solid rgba(185,164,245,0.18);
+    border-radius: 14px;
+    padding: 17px;
+    margin-bottom: 12px;
+}
+
+.about-feature h4 {
+    color: #65E0D1;
+    margin-bottom: 5px;
+}
+
+.about-feature p {
+    color: #D8D1E8;
+    margin-bottom: 0;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+# --------------------------------
+# HEADER
 # --------------------------------
 
 st.markdown("""
 <div class="hero">
     <h1>🛡️ ScamSathi AI</h1>
-    <p>Multilingual AI-Powered Scam Call Detection</p>
-    <p class="small-muted">
+    <p>
+        Multilingual AI-Powered Scam Call Detection
+    </p>
+    <p>
         Analyze suspicious calls, identify potential fraud signals,
         and receive safety recommendations.
     </p>
 </div>
 """, unsafe_allow_html=True)
 
+# --------------------------------
+# SCAM DETECTION KEYWORDS
+# --------------------------------
+
+WARNING_KEYWORDS = {
+    "Sensitive Information Requests": {
+        "weight": 85,
+        "keywords": [
+            "share your otp",
+            "tell me your otp",
+            "send your otp",
+            "provide your otp",
+            "otp immediately",
+            "share otp",
+            "bank password",
+            "share your password",
+            "tell me your password",
+            "card number",
+            "cvv number",
+            "share your cvv",
+            "pin number",
+            "atm pin",
+            "upi pin",
+            "account password",
+            "password immediately",
+            "ಖಾತೆಯ ಪಾಸ್‌ವರ್ಡ್",
+            "ನಿಮ್ಮ ಒಟಿಪಿ",
+            "ಒಟಿಪಿ ಹೇಳಿ",
+            "ಒಟಿಪಿ ಕಳುಹಿಸಿ",
+            "ನಿಮ್ಮ ಪಿನ್",
+            "ನಿಮ್ಮ ಎಟಿಎಂ ಪಿನ್",
+            "ओटीपी बताएं",
+            "ओटीपी भेजें",
+            "अपना ओटीपी साझा करें",
+            "एटीएम पिन",
+            "यूपीआई पिन",
+            "पासवर्ड बताएं",
+            "మీ ఓటీపీ చెప్పండి",
+            "ఓటీపీ పంపండి",
+            "మీ పిన్ చెప్పండి",
+            "మీ పాస్‌వర్డ్ చెప్పండి",
+            "உங்கள் ஓடிபி சொல்லுங்கள்",
+            "ஓடிபி அனுப்புங்கள்",
+            "உங்கள் பின் எண்ணை சொல்லுங்கள்",
+            "మీ OTP",
+            "നിങ്ങളുടെ ഒടിപി",
+            "ഒടിപി പറയൂ",
+            "പാസ്‌വേഡ് പറയൂ"
+        ]
+    },
+
+    "Urgent Payment Requests": {
+        "weight": 35,
+        "keywords": [
+            "transfer money",
+            "send money immediately",
+            "pay immediately",
+            "make a payment",
+            "urgent payment",
+            "send the amount",
+            "transfer the amount",
+            "pay now",
+            "money transfer",
+            "ತಕ್ಷಣ ಹಣ ಕಳುಹಿಸಿ",
+            "ಹಣ ವರ್ಗಾಯಿಸಿ",
+            "ಈಗಲೇ ಪಾವತಿಸಿ",
+            "तुरंत पैसे भेजें",
+            "अभी भुगतान करें",
+            "पैसे ट्रांसफर करें",
+            "तुरंत भुगतान",
+            "వెంటనే డబ్బు పంపండి",
+            "డబ్బు బదిలీ చేయండి",
+            "ఇప్పుడే చెల్లించండి",
+            "உடனே பணம் அனுப்புங்கள்",
+            "இப்போதே பணம் செலுத்துங்கள்",
+            "പണം ഉടൻ അയയ്ക്കുക",
+            "ഉടൻ പണമടയ്ക്കുക"
+        ]
+    },
+
+    "Threats and Pressure Tactics": {
+        "weight": 25,
+        "keywords": [
+            "account will be blocked",
+            "account will be suspended",
+            "account blocked today",
+            "your account will be closed",
+            "police case",
+            "arrest warrant",
+            "you will be arrested",
+            "legal action",
+            "immediately or else",
+            "last warning",
+            "your account is at risk",
+            "ಖಾತೆ ಬ್ಲಾಕ್ ಆಗುತ್ತದೆ",
+            "ಖಾತೆ ಮುಚ್ಚಲಾಗುತ್ತದೆ",
+            "ಪೊಲೀಸ್ ಕೇಸ್",
+            "तुम्हारा खाता बंद हो जाएगा",
+            "खाता ब्लॉक हो जाएगा",
+            "पुलिस केस",
+            "गिरफ्तार कर लिया जाएगा",
+            "మీ ఖాతా బ్లాక్ అవుతుంది",
+            "పోలీసు కేసు",
+            "உங்கள் கணக்கு முடக்கப்படும்",
+            "காவல்துறை வழக்கு",
+            "നിങ്ങളുടെ അക്കൗണ്ട് ബ്ലോക്ക് ചെയ്യും",
+            "പോലീസ് കേസ്"
+        ]
+    },
+
+    "Suspicious Links and Access Requests": {
+        "weight": 35,
+        "keywords": [
+            "click this link",
+            "open this link",
+            "install this app",
+            "download this application",
+            "share your screen",
+            "screen sharing",
+            "remote access",
+            "install anydesk",
+            "install teamviewer",
+            "click the link",
+            "open the link",
+            "link sent to your phone",
+            "ಅಪರಿಚಿತ ಲಿಂಕ್ ತೆರೆಯಿರಿ",
+            "ಈ ಲಿಂಕ್ ಕ್ಲಿಕ್ ಮಾಡಿ",
+            "ಆಪ್ ಇನ್‌ಸ್ಟಾಲ್ ಮಾಡಿ",
+            "स्क्रीन शेयर करें",
+            "इस लिंक पर क्लिक करें",
+            "ऐप इंस्टॉल करें",
+            "ఈ లింక్ క్లిక్ చేయండి",
+            "యాప్ ఇన్‌స్టాల్ చేయండి",
+            "உங்கள் திரையை பகிரவும்",
+            "இந்த இணைப்பை கிளிக் செய்யவும்",
+            "ആപ്പ് ഇൻസ്റ്റാൾ ചെയ്യുക",
+            "ലിങ്കിൽ ക്ലിക്ക് ചെയ്യുക"
+        ]
+    },
+
+    "Suspicious Identity and KYC Requests": {
+        "weight": 15,
+        "keywords": [
+            "kyc verification",
+            "update your kyc",
+            "complete your kyc",
+            "bank verification",
+            "verify your account",
+            "account verification",
+            "aadhaar verification",
+            "pan card verification",
+            "your kyc is pending",
+            "kyc update",
+            "ನಿಮ್ಮ ಕೆವೈಸಿ ಅಪ್‌ಡೇಟ್ ಮಾಡಿ",
+            "ಕೆವೈಸಿ ಪರಿಶೀಲನೆ",
+            "अपना केवाईसी अपडेट करें",
+            "केवाईसी सत्यापन",
+            "आधार सत्यापन",
+            "మీ కేవైసీ అప్డేట్ చేయండి",
+            "కేవైసీ ధృవీకరణ",
+            "உங்கள் கேஒய்சி புதுப்பிக்கவும்",
+            "கேஒய்சி சரிபார்ப்பு",
+            "നിങ്ങളുടെ കെവൈസി അപ്ഡേറ്റ് ചെയ്യുക",
+            "കെവൈസി പരിശോധന"
+        ]
+    }
+}
+
+# --------------------------------
+# TEXT ANALYSIS FUNCTION
+# --------------------------------
+
+def analyze_transcript(transcript):
+
+    transcript_lower = transcript.lower()
+
+    detected_signals = []
+    total_score = 0
+
+    for category, details in WARNING_KEYWORDS.items():
+
+        matched_keywords = []
+
+        for keyword in details["keywords"]:
+            if keyword.lower() in transcript_lower:
+                matched_keywords.append(keyword)
+
+        if matched_keywords:
+            detected_signals.append({
+                "category": category,
+                "weight": details["weight"],
+                "matched_keywords": matched_keywords
+            })
+
+            total_score += details["weight"]
+
+    total_score = min(total_score, 100)
+
+    if total_score >= 70:
+        risk_level = "HIGH"
+    elif total_score >= 35:
+        risk_level = "MEDIUM"
+    else:
+        risk_level = "LOW"
+
+    return {
+        "risk_score": total_score,
+        "risk_level": risk_level,
+        "detected_signals": detected_signals,
+        "transcript": transcript
+    }
+
+# --------------------------------
+# TRANSCRIPTION FUNCTION
+# --------------------------------
+
+def transcribe_audio(audio_file):
+
+    if not API_KEY:
+        raise ValueError(
+            "API key not found. Check your .env file or Streamlit Secrets."
+        )
+
+    headers = {
+        "X-API-Key-ID": API_KEY
+    }
+
+    files = {
+        "audio_file": (
+            audio_file.name,
+            audio_file.getvalue(),
+            audio_file.type
+        )
+    }
+
+    data = {
+        "model": MODEL,
+        "language_code": "indic-auto"
+    }
+
+    response = requests.post(
+        API_URL,
+        headers=headers,
+        files=files,
+        data=data,
+        timeout=90
+    )
+
+    if response.status_code != 200:
+        raise Exception(
+            f"Transcription failed. Status code: {response.status_code}. "
+            f"Response: {response.text[:500]}"
+        )
+
+    result = response.json()
+
+    transcript = ""
+
+    if isinstance(result, dict):
+        transcript = (
+            result.get("transcript")
+            or result.get("text")
+            or result.get("transcription")
+            or ""
+        )
+
+        if not transcript and isinstance(result.get("data"), dict):
+            transcript = (
+                result["data"].get("transcript")
+                or result["data"].get("text")
+                or ""
+            )
+
+    if not transcript:
+        raise Exception(
+            "No transcript was returned by the speech recognition service."
+        )
+
+    return transcript
+
+# --------------------------------
+# RECOMMENDATIONS
+# --------------------------------
+
+def get_recommendations(risk_level, detected_signals):
+
+    recommendations = []
+
+    categories = [
+        signal["category"]
+        for signal in detected_signals
+    ]
+
+    if "Sensitive Information Requests" in categories:
+        recommendations.append(
+            "Never share OTPs, PINs, passwords, CVV numbers, "
+            "or banking credentials over a phone call."
+        )
+
+    if "Urgent Payment Requests" in categories:
+        recommendations.append(
+            "Do not transfer money under pressure. "
+            "Verify the request independently."
+        )
+
+    if "Threats and Pressure Tactics" in categories:
+        recommendations.append(
+            "Do not panic because of threats. "
+            "Contact the concerned organization using its official number."
+        )
+
+    if "Suspicious Links and Access Requests" in categories:
+        recommendations.append(
+            "Avoid opening unknown links or installing applications "
+            "suggested by an unverified caller."
+        )
+
+    if "Suspicious Identity and KYC Requests" in categories:
+        recommendations.append(
+            "Verify KYC requests through your bank's official website, "
+            "application, or branch."
+        )
+
+    if risk_level == "HIGH":
+        recommendations.append(
+            "Treat this call as highly suspicious. Stop sharing information "
+            "and independently contact the organization."
+        )
+
+    elif risk_level == "MEDIUM":
+        recommendations.append(
+            "Be cautious. Verify the caller's identity before taking action."
+        )
+
+    else:
+        recommendations.append(
+            "No matching warning keywords were detected. "
+            "This does not guarantee that the call is safe."
+        )
+
+    recommendations.append(
+        "If you suspect financial fraud in India, contact your bank "
+        "immediately and report cyber fraud through the official "
+        "cybercrime helpline 1930 or cybercrime.gov.in."
+    )
+
+    return recommendations
+
+# --------------------------------
+# PDF REPORT FUNCTION
+# --------------------------------
+
+def create_report(item):
+
+    buffer = io.BytesIO()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm
+    )
+
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle(
+        "ReportTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=20,
+        leading=25,
+        textColor=colors.HexColor("#176B68"),
+        alignment=TA_CENTER,
+        spaceAfter=12
+    )
+
+    heading_style = ParagraphStyle(
+        "ReportHeading",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        leading=16,
+        textColor=colors.HexColor("#176B68"),
+        spaceBefore=12,
+        spaceAfter=6
+    )
+
+    body_style = ParagraphStyle(
+        "ReportBody",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=9,
+        leading=14,
+        textColor=colors.HexColor("#292342"),
+        spaceAfter=6
+    )
+
+    small_style = ParagraphStyle(
+        "SmallText",
+        parent=body_style,
+        fontSize=8,
+        leading=11
+    )
+
+    story = []
+
+    story.append(
+        Paragraph("SCAMSATHI AI - CALL ANALYSIS REPORT", title_style)
+    )
+
+    story.append(
+        Paragraph(
+            "Multilingual AI-Powered Scam Call Detection",
+            ParagraphStyle(
+                "Subtitle",
+                parent=body_style,
+                alignment=TA_CENTER,
+                textColor=colors.HexColor("#176B68")
+            )
+        )
+    )
+
+    story.append(Spacer(1, 8))
+
+    story.append(
+        HRFlowable(
+            width="100%",
+            thickness=1,
+            color=colors.HexColor("#24C6B5")
+        )
+    )
+
+    story.append(Spacer(1, 12))
+
+    report_data = [
+        ["Report ID", escape(str(item.get("report_id", "N/A")))],
+        ["Date", escape(str(item.get("date", "N/A")))],
+        ["Audio File", escape(str(item.get("filename", "N/A")))],
+        ["Risk Score", f'{item.get("risk_score", 0)}/100'],
+        ["Risk Level", escape(str(item.get("risk_level", "N/A")))]
+    ]
+
+    table = Table(
+        report_data,
+        colWidths=[40 * mm, 125 * mm]
+    )
+
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#E7F7F4")),
+        ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor("#292342")),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTNAME", (1, 0), (1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D7D1E5")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7)
+    ]))
+
+    story.append(table)
+
+    story.append(
+        Paragraph("CALL TRANSCRIPT", heading_style)
+    )
+
+    transcript = escape(str(item.get("transcript", "")))
+    transcript = transcript.replace("\n", "<br/>")
+
+    story.append(
+        Paragraph(transcript or "No transcript available.", body_style)
+    )
+
+    story.append(
+        Paragraph("DETECTED WARNING SIGNALS", heading_style)
+    )
+
+    signals = item.get("detected_signals", [])
+
+    if signals:
+        for signal in signals:
+            category = escape(signal["category"])
+            keywords = escape(
+                ", ".join(signal.get("matched_keywords", []))
+            )
+
+            story.append(
+                Paragraph(
+                    f"<b>{category}</b><br/>"
+                    f"Matched phrases: {keywords}",
+                    body_style
+                )
+            )
+    else:
+        story.append(
+            Paragraph(
+                "No matching warning keywords were detected.",
+                body_style
+            )
+        )
+
+    story.append(
+        Paragraph("SAFETY RECOMMENDATIONS", heading_style)
+    )
+
+    recommendations = item.get("recommendations", [])
+
+    for recommendation in recommendations:
+        story.append(
+            Paragraph(
+                "• " + escape(recommendation),
+                body_style
+            )
+        )
+
+    story.append(Spacer(1, 12))
+
+    story.append(
+        HRFlowable(
+            width="100%",
+            thickness=0.8,
+            color=colors.HexColor("#D7D1E5")
+        )
+    )
+
+    story.append(Spacer(1, 8))
+
+    story.append(
+        Paragraph(
+            "<b>Disclaimer:</b> This report provides preliminary "
+            "keyword-based screening and is not a confirmation of fraud. "
+            "Speech recognition and keyword matching may produce errors. "
+            "A low risk score does not guarantee that a call is safe. "
+            "Always verify suspicious requests independently.",
+            small_style
+        )
+    )
+
+    story.append(
+        Paragraph(
+            "Generated by ScamSathi AI",
+            ParagraphStyle(
+                "FooterText",
+                parent=small_style,
+                alignment=TA_CENTER,
+                textColor=colors.HexColor("#176B68"),
+                spaceBefore=12
+            )
+        )
+    )
+
+    doc.build(story)
+
+    buffer.seek(0)
+
+    return buffer
+
+# --------------------------------
+# RISK DISPLAY
+# --------------------------------
+
+def display_risk_result(result):
+
+    score = result["risk_score"]
+    level = result["risk_level"]
+
+    if level == "HIGH":
+        st.error("🚨 HIGH RISK — Suspicious warning signals detected.")
+
+    elif level == "MEDIUM":
+        st.warning("⚠️ MEDIUM RISK — Please verify this call carefully.")
+
+    else:
+        st.success("✅ LOW RISK — No strong warning signals detected.")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-number">{score}/100</div>
+                <div class="metric-label">RISK SCORE</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with col2:
+        st.markdown(
+            f"""
+            <div class="metric-card">
+                <div class="metric-number">{level}</div>
+                <div class="metric-label">RISK LEVEL</div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    st.progress(score / 100)
+
+    st.markdown("### 📝 Call Transcript")
+
+    st.markdown(
+        f"""
+        <div class="section-card">
+            {escape(result["transcript"])}
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.markdown("### 🚩 Detected Warning Signals")
+
+    signals = result["detected_signals"]
+
+    if signals:
+
+        for signal in signals:
+
+            with st.expander(
+                f"⚠️ {signal['category']}"
+            ):
+                st.write(
+                    "**Matched phrases:**",
+                    ", ".join(signal["matched_keywords"])
+                )
+
+                st.write(
+                    f"**Risk contribution:** {signal['weight']} points"
+                )
+
+    else:
+        st.info(
+            "No matching warning keywords were found in this transcript."
+        )
+
+    st.markdown("### 🛡️ Safety Recommendations")
+
+    for recommendation in result["recommendations"]:
+        st.markdown(f"- {recommendation}")
+
+# --------------------------------
+# MAIN TABS
+# --------------------------------
 
 tab_analyze, tab_history, tab_about = st.tabs([
     "🔍 Analyze Call",
@@ -796,232 +896,110 @@ tab_analyze, tab_history, tab_about = st.tabs([
     "ℹ️ About"
 ])
 
-
 # --------------------------------
 # ANALYZE CALL TAB
 # --------------------------------
 
 with tab_analyze:
 
-    st.subheader("Upload and Analyze")
+    st.markdown("## 🔍 Upload and Analyze")
 
     st.write(
-        "Upload a call recording to check for potential "
-        "fraud warning signs."
+        "Upload a call recording to check for potential fraud warning signs."
     )
 
-    audio_file = st.file_uploader(
-        "Choose an audio recording",
-        type=["wav", "mp3", "m4a", "ogg", "flac", "aac"]
+    uploaded_file = st.file_uploader(
+        "Choose an audio file",
+        type=["wav", "mp3", "m4a", "ogg", "flac", "aac"],
+        help="Supported formats: WAV, MP3, M4A, OGG, FLAC and AAC."
     )
 
-    if audio_file is not None:
+    if uploaded_file:
 
-        st.audio(audio_file)
+        st.audio(
+            uploaded_file,
+            format=uploaded_file.type
+        )
 
-        if st.button("🔍 Analyze Call", type="primary"):
+        if st.button(
+            "🔍 Analyze Call",
+            use_container_width=True
+        ):
 
-            if not API_KEY:
-
-                st.error(
-                    "API key not found. Add GNANI_API_KEY in "
-                    "Streamlit Secrets or your local .env file."
-                )
-
-            else:
+            with st.spinner(
+                "Transcribing audio and checking for suspicious signals..."
+            ):
 
                 try:
 
-                    with st.spinner(
-                        "Prisma AI is transcribing your recording..."
-                    ):
+                    transcript = transcribe_audio(uploaded_file)
 
-                        response = requests.post(
-                            "https://api.vachana.ai/stt/v3",
+                    analysis = analyze_transcript(transcript)
 
-                            headers={
-                                "X-API-Key-ID": API_KEY
-                            },
+                    recommendations = get_recommendations(
+                        analysis["risk_level"],
+                        analysis["detected_signals"]
+                    )
 
-                            files={
-                                "audio_file": (
-                                    audio_file.name,
-                                    audio_file.getvalue(),
-                                    audio_file.type or "application/octet-stream"
-                                )
-                            },
+                    result = {
+                        "report_id": str(uuid.uuid4())[:8].upper(),
+                        "date": datetime.now().strftime("%d-%m-%Y %H:%M"),
+                        "filename": uploaded_file.name,
+                        "risk_score": analysis["risk_score"],
+                        "risk_level": analysis["risk_level"],
+                        "transcript": transcript,
+                        "detected_signals": analysis["detected_signals"],
+                        "recommendations": recommendations
+                    }
 
-                            data={
-                                "model": "prisma-v3.0",
-                                "language_code": "indic-auto"
-                            },
+                    st.session_state.analysis_result = result
 
-                            timeout=90
-                        )
+                    st.session_state.history.insert(0, result)
 
-                    if response.ok:
+                    st.success("Call analysis completed!")
 
-                        result = response.json()
-
-                        transcript = result.get("transcript", "")
-
-                        if not transcript.strip():
-
-                            st.warning(
-                                "No speech was detected. "
-                                "Please try another recording."
-                            )
-
-                        else:
-
-                            with st.spinner(
-                                "Checking for suspicious patterns..."
-                            ):
-
-                                score, risk, detected, recommendation = (
-                                    analyze_scam(transcript)
-                                )
-
-                            item = {
-                                "report_id": (
-                                    "SSA-" + uuid.uuid4().hex[:10].upper()
-                                ),
-                                "date": datetime.now().strftime(
-                                    "%d-%m-%Y %H:%M"
-                                ),
-                                "filename": audio_file.name,
-                                "transcript": transcript,
-                                "score": score,
-                                "risk": risk,
-                                "detected": detected,
-                                "recommendation": recommendation
-                            }
-
-                            st.session_state.latest_result = item
-
-                            st.session_state.history.insert(0, item)
-
-                            st.success(
-                                "Call analysis completed successfully!"
-                            )
-
-                    else:
-
-                        st.error(
-                            f"API Error {response.status_code}: "
-                            f"{response.text[:500]}"
-                        )
-
-                except requests.exceptions.RequestException as error:
-
-                    st.error(f"Connection error: {error}")
-
-                except ValueError:
+                except Exception as error:
 
                     st.error(
-                        "Could not read the API response. "
-                        "Please try again."
+                        f"Unable to analyze the audio: {str(error)}"
                     )
 
-    # DISPLAY LATEST RESULT
+    if st.session_state.analysis_result:
 
-    item = st.session_state.latest_result
+        st.markdown("---")
 
-    if item is not None:
+        st.markdown("## 📊 Analysis Result")
 
-        st.divider()
+        display_risk_result(
+            st.session_state.analysis_result
+        )
 
-        st.subheader("📝 Call Transcript")
-
-        st.write(item["transcript"])
-
-        st.caption("Speech Recognition: Gnani AI Prisma v3.0")
-
-        st.divider()
-
-        st.subheader("🛡️ Risk Assessment")
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            st.metric("Risk Score", f"{item['score']}/100")
-
-        with col2:
-            st.metric("Risk Level", item["risk"])
-
-        with col3:
-            st.metric(
-                "Warning Categories",
-                len(item["detected"])
-            )
-
-        st.progress(item["score"] / 100)
-
-        if item["risk"] == "HIGH":
-
-            st.error(
-                "🚨 HIGH RISK — Strong warning signals detected."
-            )
-
-        elif item["risk"] == "MEDIUM":
-
-            st.warning(
-                "⚠️ MEDIUM RISK — Suspicious signals detected."
-            )
-
-        else:
-
-            st.success(
-                "✅ LOW RISK — Few or no matching signals detected."
-            )
-
-        st.divider()
-
-        st.subheader("🔎 Detected Warning Signals")
-
-        if item["detected"]:
-
-            for signal in item["detected"]:
-
-                with st.expander(
-                    signal["category"]
-                    + f" (+{signal['points']} points)"
-                ):
-
-                    st.write(
-                        "**Matched terms:** "
-                        + ", ".join(signal["keywords"])
-                    )
-
-        else:
-
-            st.write("No matching warning patterns found.")
-
-        st.divider()
-
-        st.subheader("💡 Safety Recommendation")
-
-        st.info(item["recommendation"])
-
-        # PDF DOWNLOAD
-
-        pdf_data = create_report(item)
+        pdf_buffer = create_report(
+            st.session_state.analysis_result
+        )
 
         st.download_button(
-            label="📄 Download Professional PDF Report",
-            data=pdf_data,
-            file_name=f"ScamSathi_{item['report_id']}.pdf",
+            label="📄 Download PDF Report",
+            data=pdf_buffer,
+            file_name=(
+                "ScamSathi_Report_"
+                + st.session_state.analysis_result["report_id"]
+                + ".pdf"
+            ),
             mime="application/pdf",
-            key="latest_pdf_download",
-            type="primary"
+            use_container_width=True
         )
 
-        st.caption(
-            "This is a preliminary rule-based screening, not a "
-            "confirmed scam verdict. A low-risk result does not "
-            "guarantee that a call is safe."
-        )
-
+    st.markdown(
+        """
+        <p class="small-note">
+        Note: Analysis is based on speech transcription and keyword matching.
+        It is a preliminary safety screening tool, not a guarantee that a call
+        is genuine or fraudulent.
+        </p>
+        """,
+        unsafe_allow_html=True
+    )
 
 # --------------------------------
 # HISTORY TAB
@@ -1029,51 +1007,69 @@ with tab_analyze:
 
 with tab_history:
 
-    st.subheader("📋 Previous Call Analyses")
+    st.markdown("## 📋 Analysis History")
 
-    history = st.session_state.history
+    st.write(
+        "Your recent call analyses are shown here during this session."
+    )
 
-    if history:
+    if st.session_state.history:
 
-        st.write(
-            f"Analyses in this session: {len(history)}"
-        )
-
-        for index, item in enumerate(history):
+        for index, item in enumerate(st.session_state.history):
 
             with st.expander(
-                f"{item['filename']} | {item['risk']} "
-                f"| {item['score']}/100 | {item['date']}"
+                f"{item['filename']} — {item['risk_level']} "
+                f"({item['risk_score']}/100)"
             ):
+
+                st.write("**Date:**", item["date"])
+
+                st.write("**Report ID:**", item["report_id"])
+
+                st.write("**Risk Level:**", item["risk_level"])
+
+                st.write("**Risk Score:**", f"{item['risk_score']}/100")
 
                 st.write("**Transcript:**")
 
                 st.write(item["transcript"])
 
-                st.write(
-                    f"**Risk:** {item['risk']} "
-                    f"({item['score']}/100)"
-                )
+                st.write("**Detected Signals:**")
+
+                if item["detected_signals"]:
+
+                    for signal in item["detected_signals"]:
+                        st.write(
+                            "- " + signal["category"]
+                        )
+
+                else:
+                    st.write("No matching warning signals detected.")
 
                 st.download_button(
-                    "📄 Download PDF Report",
+                    label="📄 Download This Report",
                     data=create_report(item),
-                    file_name=f"ScamSathi_{item['report_id']}.pdf",
+                    file_name=f"ScamSathi_Report_{item['report_id']}.pdf",
                     mime="application/pdf",
-                    key=f"history_pdf_download_{index}"
+                    key=f"history_download_{index}"
                 )
+
+        if st.button(
+            "🗑️ Clear History",
+            use_container_width=True
+        ):
+
+            st.session_state.history = []
+            st.session_state.analysis_result = None
+
+            st.rerun()
 
     else:
 
         st.info(
-            "No analysis history yet. Analyze a call to see it here."
+            "No analysis history yet. Upload an audio recording "
+            "in the Analyze Call tab to get started."
         )
-
-    st.caption(
-        "History is stored only during the current app session. "
-        "It is not permanently saved."
-    )
-
 
 # --------------------------------
 # ABOUT TAB
@@ -1081,43 +1077,115 @@ with tab_history:
 
 with tab_about:
 
-    st.subheader("About ScamSathi AI")
+    st.subheader("ℹ️ About ScamSathi AI")
 
-    st.write(
-        "ScamSathi AI is a prototype designed to help users "
-        "understand suspicious phone calls."
-    )
+    st.markdown("""
+    <div class="hero">
+        <h2>Making Digital Calls Safer</h2>
+        <p>
+            ScamSathi AI is a multilingual call screening prototype
+            designed to help users identify possible scam warning signs
+            in phone conversations.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    st.markdown("### Key Features")
+    st.markdown("### ✨ Key Features")
 
-    st.write("- Multilingual audio transcription")
-    st.write("- English and Kannada warning phrase detection")
-    st.write("- Risk scoring from 0 to 100")
-    st.write("- Safety recommendations")
-    st.write("- Professional downloadable PDF reports")
-    st.write("- Session-based analysis history")
+    st.markdown("""
+    <div class="about-feature">
+        <h4>🎙️ Audio Transcription</h4>
+        <p>
+            Converts uploaded call recordings into text using a
+            speech recognition service.
+        </p>
+    </div>
 
-    st.markdown("### Technology Used")
+    <div class="about-feature">
+        <h4>🌐 Multilingual Support</h4>
+        <p>
+            Designed to work with Indian-language speech, including
+            English, Kannada, Hindi, Telugu, Tamil and Malayalam.
+            Actual results depend on transcription quality.
+        </p>
+    </div>
 
-    st.write("- Gnani AI Prisma v3.0")
-    st.write("- Python")
-    st.write("- Streamlit")
-    st.write("- ReportLab")
-    st.write("- Requests and Python dotenv")
+    <div class="about-feature">
+        <h4>🚩 Warning Signal Detection</h4>
+        <p>
+            Checks the transcript for suspicious phrases related to
+            OTP requests, urgent payments, threats, suspicious links
+            and KYC requests.
+        </p>
+    </div>
+
+    <div class="about-feature">
+        <h4>📊 Risk Scoring</h4>
+        <p>
+            Provides a preliminary risk score and classifies the result
+            as Low, Medium or High based on detected warning signals.
+        </p>
+    </div>
+
+    <div class="about-feature">
+        <h4>📄 PDF Reports</h4>
+        <p>
+            Generates a downloadable report containing the transcript,
+            detected warning signals and safety recommendations.
+        </p>
+    </div>
+
+    <div class="about-feature">
+        <h4>📋 Analysis History</h4>
+        <p>
+            Allows users to review previous analyses during the
+            current app session.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown("### ⚙️ How It Works")
+
+    st.markdown("""
+    1. **Upload:** The user uploads a call recording.
+    2. **Transcribe:** Speech recognition converts the audio into text.
+    3. **Analyze:** The system checks the transcript for warning phrases.
+    4. **Score:** A preliminary risk score is calculated.
+    5. **Recommend:** Safety suggestions are displayed.
+    6. **Report:** The user can download a PDF report.
+    """)
+
+    st.markdown("### 🛡️ Important Safety Note")
 
     st.warning(
-        "ScamSathi AI is an experimental screening tool. "
-        "It does not confirm whether a call is genuine or fraudulent. "
-        "Always verify important requests independently."
+        "ScamSathi AI is a prototype for preliminary screening. "
+        "It does not prove that a caller is genuine or fraudulent. "
+        "Keyword matching can miss suspicious wording or flag harmless "
+        "conversations. Always verify requests through official channels."
     )
 
+    st.markdown("### 👩‍💻 Built With")
+
+    st.markdown("""
+    - Python
+    - Streamlit
+    - Gnani AI Prisma Speech Recognition
+    - Requests
+    - ReportLab
+    """)
+
+    st.markdown("""
+    <div class="footer">
+        ScamSathi AI | Making Digital Calls Safer
+    </div>
+    """, unsafe_allow_html=True)
 
 # --------------------------------
 # FOOTER
 # --------------------------------
 
-st.divider()
-
-st.caption(
-    "🛡️ ScamSathi AI | Powered by Gnani AI Prisma v3.0"
-)
+st.markdown("""
+<div class="footer">
+    🛡️ ScamSathi AI | Stay Alert. Stay Safe.
+</div>
+""", unsafe_allow_html=True)
