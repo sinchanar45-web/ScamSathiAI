@@ -2,9 +2,27 @@
 import streamlit as st
 import requests
 import os
+import io
+import uuid
 from pathlib import Path
 from dotenv import load_dotenv
 from datetime import datetime
+from xml.sax.saxutils import escape
+
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+    HRFlowable,
+    KeepTogether
+)
 
 # --------------------------------
 # CONFIGURATION
@@ -12,7 +30,15 @@ from datetime import datetime
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
+
 API_KEY = os.getenv("GNANI_API_KEY")
+
+# Streamlit Community Cloud secrets fallback
+if not API_KEY:
+    try:
+        API_KEY = st.secrets["GNANI_API_KEY"]
+    except Exception:
+        API_KEY = None
 
 st.set_page_config(
     page_title="ScamSathi AI",
@@ -78,6 +104,11 @@ div[data-testid="stMetric"] {
     border-radius: 9px;
     font-weight: 600;
 }
+
+.stDownloadButton button {
+    border-radius: 9px;
+    font-weight: 600;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -95,7 +126,6 @@ def analyze_scam(transcript):
 
         "Sensitive information requests": {
             "keywords": [
-                # English
                 "otp",
                 "one time password",
                 "one-time password",
@@ -105,7 +135,6 @@ def analyze_scam(transcript):
                 "bank details",
                 "account number",
 
-                # Kannada
                 "ಒಟಿಪಿ",
                 "ಒಟಿಪಿಯನ್ನು",
                 "ಒನ್ ಟೈಮ್ ಪಾಸ್ವರ್ಡ್",
@@ -120,7 +149,6 @@ def analyze_scam(transcript):
 
         "Urgent payment requests": {
             "keywords": [
-                # English
                 "transfer money",
                 "send money",
                 "upi payment",
@@ -128,7 +156,6 @@ def analyze_scam(transcript):
                 "urgent payment",
                 "make a payment",
 
-                # Kannada
                 "ಹಣ ವರ್ಗಾಯಿಸಿ",
                 "ಹಣ ಕಳುಹಿಸಿ",
                 "ತಕ್ಷಣ ಪಾವತಿಸಿ",
@@ -140,7 +167,6 @@ def analyze_scam(transcript):
 
         "Threatening or pressuring language": {
             "keywords": [
-                # English
                 "account blocked",
                 "account will be blocked",
                 "account may be blocked",
@@ -152,7 +178,6 @@ def analyze_scam(transcript):
                 "right now",
                 "within one hour",
 
-                # Kannada
                 "ಬ್ಲಾಕ್ ಆಗುತ್ತದೆ",
                 "ಬ್ಲಾಕ್ ಆಗಲಿದೆ",
                 "ಖಾತೆ ಬ್ಲಾಕ್",
@@ -169,7 +194,6 @@ def analyze_scam(transcript):
 
         "Suspicious links or access requests": {
             "keywords": [
-                # English
                 "click this link",
                 "download this app",
                 "remote access",
@@ -177,7 +201,6 @@ def analyze_scam(transcript):
                 "share your screen",
                 "install this application",
 
-                # Kannada
                 "ಈ ಲಿಂಕ್ ಕ್ಲಿಕ್ ಮಾಡಿ",
                 "ಈ ಆಪ್ ಡೌನ್‌ಲೋಡ್ ಮಾಡಿ",
                 "ಸ್ಕ್ರೀನ್ ಹಂಚಿಕೊಳ್ಳಿ",
@@ -188,7 +211,6 @@ def analyze_scam(transcript):
 
         "Suspicious identity or KYC claims": {
             "keywords": [
-                # English
                 "bank officer",
                 "calling from your bank",
                 "customer care",
@@ -199,7 +221,6 @@ def analyze_scam(transcript):
                 "lottery winner",
                 "prize money",
 
-                # Kannada
                 "ನಿಮ್ಮ ಬ್ಯಾಂಕಿನಿಂದ ಕರೆ",
                 "ಬ್ಯಾಂಕಿನಿಂದ ಕರೆ ಮಾಡುತ್ತಿದ್ದೇನೆ",
                 "ಕೆವೈಸಿ ಪರಿಶೀಲನೆ",
@@ -267,57 +288,447 @@ def analyze_scam(transcript):
 
 
 # --------------------------------
-# REPORT GENERATOR
+# PROFESSIONAL PDF REPORT GENERATOR
 # --------------------------------
 
 def create_report(item):
 
-    report = f"""
-SCAMSATHI AI - CALL ANALYSIS REPORT
-===================================
+    buffer = io.BytesIO()
 
-Date: {item['date']}
+    report_id = item.get("report_id")
 
-Risk Score: {item['score']}/100
-Risk Level: {item['risk']}
+    if not report_id:
+        report_id = "SSA-" + uuid.uuid4().hex[:10].upper()
+        item["report_id"] = report_id
 
-CALL TRANSCRIPT
----------------
-{item['transcript']}
+    navy = colors.HexColor("#14233D")
+    blue = colors.HexColor("#1D4E89")
+    light_blue = colors.HexColor("#EAF2FA")
+    grey = colors.HexColor("#64748B")
+    dark = colors.HexColor("#1E293B")
+    border = colors.HexColor("#D9E2EC")
 
-DETECTED WARNING SIGNALS
-------------------------
-"""
+    if item["risk"] == "HIGH":
+        risk_color = colors.HexColor("#DC2626")
+        risk_bg = colors.HexColor("#FEE2E2")
+    elif item["risk"] == "MEDIUM":
+        risk_color = colors.HexColor("#D97706")
+        risk_bg = colors.HexColor("#FEF3C7")
+    else:
+        risk_color = colors.HexColor("#15803D")
+        risk_bg = colors.HexColor("#DCFCE7")
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=18 * mm,
+        leftMargin=18 * mm,
+        topMargin=17 * mm,
+        bottomMargin=18 * mm,
+        title="ScamSathi AI Analysis Report",
+        author="ScamSathi AI",
+        subject="Preliminary call safety screening"
+    )
+
+    styles = getSampleStyleSheet()
+
+    styles.add(ParagraphStyle(
+        name="ReportTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=23,
+        leading=28,
+        textColor=colors.white,
+        alignment=TA_LEFT,
+        spaceAfter=5
+    ))
+
+    styles.add(ParagraphStyle(
+        name="ReportSubtitle",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=10,
+        leading=15,
+        textColor=colors.HexColor("#DCE8F5")
+    ))
+
+    styles.add(ParagraphStyle(
+        name="SectionHeading",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=12,
+        leading=16,
+        textColor=navy,
+        spaceBefore=12,
+        spaceAfter=7
+    ))
+
+    styles.add(ParagraphStyle(
+        name="BodyCustom",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=9,
+        leading=14,
+        textColor=dark,
+        spaceAfter=4
+    ))
+
+    styles.add(ParagraphStyle(
+        name="SmallCustom",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=8,
+        leading=11,
+        textColor=grey
+    ))
+
+    styles.add(ParagraphStyle(
+        name="RiskValue",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=22,
+        leading=27,
+        textColor=risk_color,
+        alignment=TA_CENTER
+    ))
+
+    styles.add(ParagraphStyle(
+        name="RiskLabel",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=10,
+        leading=14,
+        textColor=risk_color,
+        alignment=TA_CENTER
+    ))
+
+    styles.add(ParagraphStyle(
+        name="TableHeaderCustom",
+        parent=styles["Normal"],
+        fontName="Helvetica-Bold",
+        fontSize=8,
+        leading=11,
+        textColor=colors.white
+    ))
+
+    styles.add(ParagraphStyle(
+        name="TableBodyCustom",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=8,
+        leading=12,
+        textColor=dark
+    ))
+
+    story = []
+
+    # HEADER
+
+    header_content = [
+        Paragraph(
+            "SCAMSATHI AI",
+            styles["ReportTitle"]
+        ),
+        Paragraph(
+            "MULTILINGUAL CALL SAFETY ANALYSIS",
+            styles["ReportSubtitle"]
+        ),
+        Spacer(1, 5)
+    ]
+
+    header_table = Table(
+        [[header_content]],
+        colWidths=[174 * mm]
+    )
+
+    header_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), navy),
+        ("BOX", (0, 0), (-1, -1), 0.8, blue),
+        ("LEFTPADDING", (0, 0), (-1, -1), 14),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+        ("TOPPADDING", (0, 0), (-1, -1), 14),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE")
+    ]))
+
+    story.append(header_table)
+    story.append(Spacer(1, 12))
+
+    # REPORT INFORMATION
+
+    info_data = [
+        [
+            Paragraph("<b>REPORT ID</b>", styles["SmallCustom"]),
+            Paragraph("<b>ANALYSIS DATE</b>", styles["SmallCustom"]),
+            Paragraph("<b>AUDIO FILE</b>", styles["SmallCustom"])
+        ],
+        [
+            Paragraph(escape(report_id), styles["BodyCustom"]),
+            Paragraph(escape(item["date"]), styles["BodyCustom"]),
+            Paragraph(escape(item.get("filename", "Audio recording")), styles["BodyCustom"])
+        ]
+    ]
+
+    info_table = Table(
+        info_data,
+        colWidths=[48 * mm, 54 * mm, 72 * mm]
+    )
+
+    info_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), light_blue),
+        ("BOX", (0, 0), (-1, -1), 0.6, border),
+        ("INNERGRID", (0, 0), (-1, -1), 0.4, border),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "TOP")
+    ]))
+
+    story.append(info_table)
+
+    # RISK SUMMARY
+
+    story.append(Paragraph(
+        "01  |  RISK ASSESSMENT",
+        styles["SectionHeading"]
+    ))
+
+    risk_table = Table(
+        [[
+            Paragraph(
+                f"{item['score']} / 100",
+                styles["RiskValue"]
+            ),
+            Paragraph(
+                item["risk"] + " RISK",
+                styles["RiskLabel"]
+            ),
+            Paragraph(
+                f"{len(item['detected'])} warning categories",
+                styles["BodyCustom"]
+            )
+        ]],
+        colWidths=[58 * mm, 58 * mm, 58 * mm]
+    )
+
+    risk_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (0, 0), light_blue),
+        ("BACKGROUND", (1, 0), (1, 0), risk_bg),
+        ("BACKGROUND", (2, 0), (2, 0), colors.HexColor("#F1F5F9")),
+        ("BOX", (0, 0), (-1, -1), 0.6, border),
+        ("INNERGRID", (0, 0), (-1, -1), 0.5, border),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 14),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 14)
+    ]))
+
+    story.append(risk_table)
+
+    # WARNING SIGNALS
+
+    story.append(Paragraph(
+        "02  |  DETECTED WARNING SIGNALS",
+        styles["SectionHeading"]
+    ))
 
     if item["detected"]:
 
+        signal_data = [[
+            Paragraph("CATEGORY", styles["TableHeaderCustom"]),
+            Paragraph("MATCHED TERMS", styles["TableHeaderCustom"]),
+            Paragraph("POINTS", styles["TableHeaderCustom"])
+        ]]
+
         for signal in item["detected"]:
 
-            report += (
-                f"\n{signal['category']}\n"
-                f"Matched terms: {', '.join(signal['keywords'])}\n"
-                f"Points: {signal['points']}\n"
-            )
+            signal_data.append([
+                Paragraph(
+                    escape(signal["category"]),
+                    styles["TableBodyCustom"]
+                ),
+                Paragraph(
+                    escape(", ".join(signal["keywords"])),
+                    styles["TableBodyCustom"]
+                ),
+                Paragraph(
+                    f"+{signal['points']}",
+                    styles["TableBodyCustom"]
+                )
+            ])
+
+        signal_table = Table(
+            signal_data,
+            colWidths=[58 * mm, 96 * mm, 20 * mm],
+            repeatRows=1
+        )
+
+        signal_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), navy),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [
+                colors.white,
+                colors.HexColor("#F4F7FB")
+            ]),
+            ("BOX", (0, 0), (-1, -1), 0.6, border),
+            ("INNERGRID", (0, 0), (-1, -1), 0.4, border),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 7),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8)
+        ]))
+
+        story.append(signal_table)
 
     else:
 
-        report += "\nNo matching warning patterns found.\n"
+        story.append(Paragraph(
+            "No matching warning patterns were detected.",
+            styles["BodyCustom"]
+        ))
 
-    report += (
-        "\nSAFETY RECOMMENDATION\n"
-        "---------------------\n"
-        + item["recommendation"]
+    # TRANSCRIPT
+
+    story.append(Paragraph(
+        "03  |  CALL TRANSCRIPT",
+        styles["SectionHeading"]
+    ))
+
+    transcript = escape(item["transcript"]).replace("\n", "<br/>")
+
+    transcript_box = Table(
+        [[Paragraph(transcript, styles["BodyCustom"])]],
+        colWidths=[174 * mm]
     )
 
-    report += (
-        "\n\nDISCLAIMER\n"
-        "This is a preliminary rule-based screening, not a confirmed "
-        "scam verdict. Speech recognition errors and context may "
-        "affect the result. A low-risk score does not guarantee "
-        "that a call is safe.\n"
+    transcript_box.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F4F7FB")),
+        ("BOX", (0, 0), (-1, -1), 0.6, border),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10)
+    ]))
+
+    story.append(transcript_box)
+
+    story.append(Paragraph(
+        "Speech recognition: Gnani AI Prisma v3.0",
+        styles["SmallCustom"]
+    ))
+
+    # SAFETY RECOMMENDATION
+
+    story.append(Paragraph(
+        "04  |  SAFETY RECOMMENDATION",
+        styles["SectionHeading"]
+    ))
+
+    recommendation_box = Table(
+        [[Paragraph(
+            escape(item["recommendation"]),
+            styles["BodyCustom"]
+        )]],
+        colWidths=[174 * mm]
     )
 
-    return report
+    recommendation_box.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), light_blue),
+        ("BOX", (0, 0), (-1, -1), 0.8, blue),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10)
+    ]))
+
+    story.append(recommendation_box)
+
+    # DISCLAIMER
+
+    story.append(Paragraph(
+        "IMPORTANT DISCLAIMER",
+        styles["SectionHeading"]
+    ))
+
+    disclaimer = (
+        "ScamSathi AI provides preliminary rule-based screening and "
+        "does not confirm whether a call is genuine or fraudulent. "
+        "Results depend on speech recognition quality and keyword "
+        "matching. Context, negation and transcription errors may "
+        "affect the result. A low-risk score does not guarantee that "
+        "a call is safe. Always verify important requests independently."
+    )
+
+    story.append(Paragraph(
+        disclaimer,
+        styles["SmallCustom"]
+    ))
+
+    story.append(Spacer(1, 15))
+
+    story.append(HRFlowable(
+        width="100%",
+        thickness=0.8,
+        color=border
+    ))
+
+    story.append(Spacer(1, 7))
+
+    story.append(Paragraph(
+        "SCAMSATHI AI  |  POWERED BY GNANI AI PRISMA V3.0",
+        ParagraphStyle(
+            "FooterCustom",
+            parent=styles["SmallCustom"],
+            alignment=TA_CENTER,
+            textColor=blue,
+            fontName="Helvetica-Bold"
+        )
+    ))
+
+    story.append(Paragraph(
+        "Call safety awareness • Preliminary screening report",
+        ParagraphStyle(
+            "FooterSub",
+            parent=styles["SmallCustom"],
+            alignment=TA_CENTER
+        )
+    ))
+
+    # PAGE FOOTER
+
+    def add_page_number(canvas, doc):
+
+        canvas.saveState()
+
+        canvas.setStrokeColor(border)
+        canvas.line(
+            18 * mm,
+            13 * mm,
+            A4[0] - 18 * mm,
+            13 * mm
+        )
+
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(grey)
+
+        canvas.drawRightString(
+            A4[0] - 18 * mm,
+            8 * mm,
+            f"Page {doc.page}"
+        )
+
+        canvas.restoreState()
+
+    doc.build(
+        story,
+        onFirstPage=add_page_number,
+        onLaterPages=add_page_number
+    )
+
+    buffer.seek(0)
+
+    return buffer.getvalue()
 
 
 # --------------------------------
@@ -413,7 +824,8 @@ with tab_analyze:
             if not API_KEY:
 
                 st.error(
-                    "API key not found. Check your .env file."
+                    "API key not found. Add GNANI_API_KEY in "
+                    "Streamlit Secrets or your local .env file."
                 )
 
             else:
@@ -471,6 +883,9 @@ with tab_analyze:
                                 )
 
                             item = {
+                                "report_id": (
+                                    "SSA-" + uuid.uuid4().hex[:10].upper()
+                                ),
                                 "date": datetime.now().strftime(
                                     "%d-%m-%Y %H:%M"
                                 ),
@@ -529,15 +944,12 @@ with tab_analyze:
         col1, col2, col3 = st.columns(3)
 
         with col1:
-
             st.metric("Risk Score", f"{item['score']}/100")
 
         with col2:
-
             st.metric("Risk Level", item["risk"])
 
         with col3:
-
             st.metric(
                 "Warning Categories",
                 len(item["detected"])
@@ -591,11 +1003,17 @@ with tab_analyze:
 
         st.info(item["recommendation"])
 
+        # PDF DOWNLOAD
+
+        pdf_data = create_report(item)
+
         st.download_button(
-            "📄 Download Analysis Report",
-            data=create_report(item),
-            file_name="ScamSathi_Analysis_Report.txt",
-            mime="text/plain"
+            label="📄 Download Professional PDF Report",
+            data=pdf_data,
+            file_name=f"ScamSathi_{item['report_id']}.pdf",
+            mime="application/pdf",
+            key="latest_pdf_download",
+            type="primary"
         )
 
         st.caption(
@@ -638,11 +1056,11 @@ with tab_history:
                 )
 
                 st.download_button(
-                    "Download this report",
+                    "📄 Download PDF Report",
                     data=create_report(item),
-                    file_name=f"ScamSathi_Report_{index + 1}.txt",
-                    mime="text/plain",
-                    key=f"history_download_{index}"
+                    file_name=f"ScamSathi_{item['report_id']}.pdf",
+                    mime="application/pdf",
+                    key=f"history_pdf_download_{index}"
                 )
 
     else:
@@ -676,7 +1094,7 @@ with tab_about:
     st.write("- English and Kannada warning phrase detection")
     st.write("- Risk scoring from 0 to 100")
     st.write("- Safety recommendations")
-    st.write("- Downloadable call analysis reports")
+    st.write("- Professional downloadable PDF reports")
     st.write("- Session-based analysis history")
 
     st.markdown("### Technology Used")
@@ -684,6 +1102,7 @@ with tab_about:
     st.write("- Gnani AI Prisma v3.0")
     st.write("- Python")
     st.write("- Streamlit")
+    st.write("- ReportLab")
     st.write("- Requests and Python dotenv")
 
     st.warning(
